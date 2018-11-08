@@ -15,4 +15,5 @@ from .twopoint_fourier import TXTwoPointFourier
 from .twopoint import TXTwoPoint
 from .input_cats import TXProtoDC2Mock
 from .photoz_mlz import PZPDFMLZ
+from .systests import TXSysTests
 from .covariance import TXFourierGaussianCovariance

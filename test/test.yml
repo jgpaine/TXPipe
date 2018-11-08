@@ -8,15 +8,13 @@ stages:
       nprocess: 1
     - name: TXSelector
       nprocess: 1
-    - name: TXRandomPhotozPDF
-      nprocess: 1
     - name: TXDiagnosticMaps
       nprocess: 1
     - name: TXPhotozStack
       nprocess: 1
     - name: TXRandomCat
       nprocess: 1
-    - name: TXTwoPoint
+    - name: TXSysTests
       nprocess: 1
 
 output_dir: ./outputs
@@ -25,11 +23,10 @@ config: test/config.yml
 
 inputs:
     # See README for paths to download these files
-    shear_catalog: ./mock_shear_catalog.fits
-    photometry_catalog: ./mock_photometry_catalog.hdf
+    shear_catalog: ./shear_catalog.fits
+    photometry_catalog: ./photometry_catalog.hdf
     photoz_trained_model: ./photoz_trained_model.npy
-    
-resume: False
+
+resume: True
 log_dir: ./test/logs
 pipeline_log: log.txt
-

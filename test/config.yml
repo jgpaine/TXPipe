@@ -58,3 +58,6 @@ TXDiagnosticMaps:
 
 TXTwoPointFourier:
     chunk_rows: 10000
+
+TXSysTests:
+     nz: 0
