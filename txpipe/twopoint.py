@@ -2433,6 +2433,7 @@ class TXSelfCalibrationIA(TXTwoPoint):
         print(f"Rank {self.rank} calculating shear-position bin pair ({i},{j}): {n_i} x {n_j} objects, {n_rand_j} randoms")
 
         ng = treecorr.NGCorrelation(self.config, max_rpar = 0.0)
+        cat_i.write(f"catalog{i}.dat")
         ng.process(cat_j, cat_i)
 
         if rancat_j:
