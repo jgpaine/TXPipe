@@ -1,14 +1,28 @@
 from .base_stage import PipelineStage
-from .data_types import MapsFile, YamlFile, RandomsCatalog, TomographyCatalog, HDFFile
+from .data_types import (
+    MapsFile,
+    YamlFile,
+    RandomsCatalog,
+    TomographyCatalog,
+    HDFFile,
+    FiducialCosmology,
+)
 from .utils import choose_pixelization, Splitter
 import numpy as np
 
 
 class TXRandomCat(PipelineStage):
+    """
+    Generate a catalog of randomly positioned points
+
+    This accounts for the depth being different in each pixel, but probably
+    does still need updates, and testing.
+    """
     name = "TXRandomCat"
     inputs = [
         ("aux_lens_maps", MapsFile),
         ("lens_photoz_stack", HDFFile),
+        ("fiducial_cosmology", FiducialCosmology),
     ]
     outputs = [
         ("random_cats", RandomsCatalog),
@@ -18,13 +32,16 @@ class TXRandomCat(PipelineStage):
         "density": 100.0,  # number per square arcmin at median depth depth.  Not sure if this is right.
         "Mstar": 23.0,  # Schecther distribution Mstar parameter
         "alpha": -1.25,  # Schecther distribution alpha parameter
+        "chunk_rows": 100_000,
     }
 
     def run(self):
         import scipy.special
         import scipy.stats
         import healpy
+        import pyccl
         from . import randoms
+        from .utils.hdf_tools import BatchWriter
 
         # Load the input depth map
         with self.open_input("aux_lens_maps", wrapper=True) as maps_file:
@@ -34,6 +51,12 @@ class TXRandomCat(PipelineStage):
             scheme = choose_pixelization(**info)
 
         pz_stack = self.open_input("lens_photoz_stack")
+
+        # We also generate comoving distances under a fiducial cosmology
+        # for each random, for use in Rlens type metrics
+        with self.open_input("fiducial_cosmology", wrapper=True) as f:
+            cosmo = f.to_ccl()
+
 
         # Cut down to pixels that have any objects in
         pixel = np.where(depth > 0)[0]
@@ -113,6 +136,7 @@ class TXRandomCat(PipelineStage):
         ra_out = group.create_dataset("ra", (n_total,), dtype=np.float64)
         dec_out = group.create_dataset("dec", (n_total,), dtype=np.float64)
         z_out = group.create_dataset("z", (n_total,), dtype=np.float64)
+        chi_out = group.create_dataset("comoving_distance", (n_total,), dtype=np.float64)
         bin_out = group.create_dataset("bin", (n_total,), dtype=np.int16)
 
         # Second output is specific to an individual bin, so we can just load
@@ -127,6 +151,7 @@ class TXRandomCat(PipelineStage):
             g.create_dataset("ra", (bin_counts[i],))
             g.create_dataset("dec", (bin_counts[i],))
             g.create_dataset("z", (bin_counts[i],))
+            g.create_dataset("comoving_distance", (bin_counts[i],))
             subgroups.append(g)
 
         pixels_per_proc = npix // self.size
@@ -142,7 +167,41 @@ class TXRandomCat(PipelineStage):
             subgroup = subgroups[j]
             # Generate the random points in each pixel
             ndone = 0
-            for i, (vertices_i) in self.split_tasks_by_rank(enumerate(vertices)):
+
+            nvertex = len(vertices)
+            my_nvertex = int(np.ceil(nvertex / self.size))
+            start_vertex = self.rank * my_nvertex
+            end_vertex = min(start_vertex + my_nvertex, nvertex)
+
+            # These two classes batch up chunks of output to be done in large
+            # sets, so that whatever the size of the randoms in this bin it will
+            # still work.
+            batch1 = BatchWriter(
+                group,
+                {
+                    "ra": np.float64,
+                    "dec": np.float64,
+                    "z": np.float64,
+                    "comoving_distance": np.float64,
+                    "bin": np.int16,
+                },
+                offset=bin_starts[j] + pix_starts[j, start_vertex],
+                max_size=self.config["chunk_rows"],
+            )
+            batch2 = BatchWriter(
+                subgroup,
+                {
+                    "ra": np.float64,
+                    "dec": np.float64,
+                    "z": np.float64,
+                    "comoving_distance": np.float64,
+                },
+                offset=pix_starts[j, start_vertex],
+                max_size=self.config["chunk_rows"],
+            )
+
+            for i in range(start_vertex, end_vertex):
+                vertices_i = vertices[i]
                 if ndone % 1000 == 0:
                     print(
                         f"Rank {self.rank} done {ndone:,} of its {pixels_per_proc:,} pixels for bin {j}"
@@ -167,21 +226,28 @@ class TXRandomCat(PipelineStage):
                 # Sometimes we don't quite go down to z - deal with that
                 cdf_rand_val = cdf_rand_val.clip(z_cdf_norm.min(), z_cdf_norm.max())
                 z_photo_rand = z_interp_func(cdf_rand_val)
+                distance = pyccl.comoving_radial_distance(
+                    cosmo, 1.0 / (1 + z_photo_rand)
+                )
 
                 # Save output to the generic non-binned output
                 index = bin_starts[j] + pix_starts[j, i]
-                ra_out[index : index + N] = ra
-                dec_out[index : index + N] = dec
-                z_out[index : index + N] = z_photo_rand
-                bin_out[index : index + N] = bin_index
+                batch1.write(
+                    ra=ra,
+                    dec=dec,
+                    z=z_photo_rand,
+                    comoving_distance=distance,
+                    bin=bin_index,
+                )
 
                 # Save to the bit that is specific to this bin
                 index = pix_starts[j, i]
-                subgroup["ra"][index : index + N] = ra
-                subgroup["dec"][index : index + N] = dec
-                subgroup["z"][index : index + N] = z_photo_rand
+                batch2.write(ra=ra, dec=dec, z=z_photo_rand, comoving_distance=distance)
 
                 ndone += 1
+
+            batch1.finish()
+            batch2.finish()
 
         if self.comm is not None:
             self.comm.Barrier()

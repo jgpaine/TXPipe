@@ -24,6 +24,7 @@ from .utils.calibrators import (
     LensfitCalibrator,
     HSCCalibrator,
 )
+from .binning import build_tomographic_classifier, apply_classifier
 import numpy as np
 import warnings
 
@@ -87,6 +88,8 @@ class BinStats:
 
 class TXSourceSelectorBase(PipelineStage):
     """
+    Base stage for source selection using S/N, size, and flag cuts and tomography
+
     The subclasses of this pipeline stage select
     objects to be used as the source sample for
     the shear-shear and shear-position calibrations.
@@ -149,6 +152,7 @@ class TXSourceSelectorBase(PipelineStage):
 
         # Are we using a metacal or lensfit catalog?
         shear_catalog_type = read_shear_catalog_type(self)
+        bands = self.config["bands"]
 
         # The output file we will put the tomographic
         # information into
@@ -161,7 +165,13 @@ class TXSourceSelectorBase(PipelineStage):
 
         # Build a classifier used to put objects into tomographic bins
         if not (self.config["input_pz"] or self.config["true_z"]):
-            classifier, features = self.build_tomographic_classifier()
+            classifier, features = build_tomographic_classifier(
+                bands,
+                self.get_input("calibration_table"),
+                self.config["source_zbin_edges"],
+                self.config["random_seed"],
+                self.comm,
+            )
 
         # We will collect the selection biases for each bin
         # as a matrix.  We will collect together the different
@@ -185,8 +195,13 @@ class TXSourceSelectorBase(PipelineStage):
 
             else:
                 # or select most likely tomographic source bin, with a random forest
-                pz_data = self.apply_classifier(classifier, features, shear_data)
-
+                pz_data = apply_classifier(
+                    classifier,
+                    features,
+                    bands,
+                    shear_catalog_type,
+                    shear_data,
+                )
             # Combine this selection with size and snr cuts to produce a source selection
             # and calculate the shear bias it would generate
             tomo_bin, R, counts = self.calculate_tomography(
@@ -208,122 +223,6 @@ class TXSourceSelectorBase(PipelineStage):
 
         # Restore the original warning settings in case we are being called from a library
         np.seterr(**original_warning_settings)
-
-    def build_tomographic_classifier(self):
-        # Load the training data
-        # Build the SOM from the training data
-        from astropy.table import Table
-        from sklearn.ensemble import RandomForestClassifier
-
-        # If we are using multiple processes then only one should do the
-        # classification, to ensure that everything is consistent. In that
-        # case if we are not the root process, wait for them to finish and
-        # receive and return their classifier
-        if self.rank > 0:
-            classifier = self.comm.bcast(None)
-            features = self.comm.bcast(None)
-            return classifier, features
-
-        # Load the training data
-        training_file = self.get_input("calibration_table")
-        training_data_table = Table.read(training_file, format="ascii")
-
-        # Pull out the appropriate columns and combinations of the data
-        bands = self.config["bands"]
-        print(f"Using these bands to train the tomography selector: {bands}")
-
-        # Generate the training data that we will use
-        # We record both the name of the column and the data iself
-        features = []
-        training_data = []
-        for b1 in bands[:]:
-            # First we use the magnitudes themselves
-            features.append(b1)
-            training_data.append(training_data_table[b1])
-            # We also use the colours as training data, even the redundant ones
-            for b2 in bands[:]:
-                if b1 < b2:
-                    features.append(f"{b1}-{b2}")
-                    training_data.append(
-                        training_data_table[b1] - training_data_table[b2]
-                    )
-        training_data = np.array(training_data).T
-
-        print("Training data for bin classifier has shape ", training_data.shape)
-
-        # Now put the training data into redshift bins
-        # We use -1 to indicate that we are outside the desired ranges
-        z = training_data_table["sz"]
-        training_bin = np.repeat(-1, len(z))
-        print("Using these bin edges:", self.config["source_zbin_edges"])
-        for i, zmin in enumerate(self.config["source_zbin_edges"][:-1]):
-            zmax = self.config["source_zbin_edges"][i + 1]
-            training_bin[(z > zmin) & (z < zmax)] = i
-            ntrain_bin = ((z > zmin) & (z < zmax)).sum()
-            print(f"Training set: {ntrain_bin} objects in tomographic bin {i}")
-
-        # Can be replaced with any classifier
-        classifier = RandomForestClassifier(
-            max_depth=10,
-            max_features=None,
-            n_estimators=20,
-            random_state=self.config["random_seed"],
-        )
-        classifier.fit(training_data, training_bin)
-
-        # Sklearn fitters can be pickled, which means they can also be sent through
-        # mpi4py
-        if self.is_mpi():
-            self.comm.bcast(classifier)
-            self.comm.bcast(features)
-
-        return classifier, features
-
-    def apply_classifier(self, classifier, features, shear_data):
-        """Apply the classifier to the measured magnitudes"""
-        bands = self.config["bands"]
-
-        if self.config["shear_catalog_type"] == "metacal":
-            prefixes = ["mcal_", "mcal_", "mcal_", "mcal_", "mcal_"]
-            suffixes = ["", "_1p", "_2p", "_1m", "_2m"]
-        elif self.config["shear_catalog_type"] == "metadetect":
-            prefixes = ["00/", "1p/", "2p/", "1m/", "2m/"]
-            suffixes = ["", "", "", "" "", ""]
-        else:
-            prefixes = [""]
-            suffixes = [""]
-
-        pz_data = {}
-
-        for prefix, suffix in zip(prefixes, suffixes):
-            # Pull out the columns that we have trained this bin selection
-            # model on.
-            data = []
-            for f in features:
-                # may be a single band
-                if len(f) == 1:
-                    col = shear_data[f"{prefix}mag_{f}{suffix}"]
-                # or a colour
-                else:
-                    b1, b2 = f.split("-")
-                    col = (
-                        shear_data[f"{prefix}mag_{b1}{suffix}"]
-                        - shear_data[f"{prefix}mag_{b2}{suffix}"]
-                    )
-                if np.all(~np.isfinite(col)):
-                    # entire column is NaN.  Hopefully this will get deselected elsewhere
-                    col[:] = 30.0
-                else:
-                    ok = np.isfinite(col)
-                    col[~ok] = col[ok].max()
-                data.append(col)
-            data = np.array(data).T
-
-            # Run the random forest on this data chunk
-            pz_data[f"{prefix}zbin{suffix}"] = classifier.predict(data)
-            if self.config["shear_catalog_type"] == "metacal":
-                pz_data[f"zbin{suffix}"] = pz_data[f"{prefix}zbin{suffix}"]
-        return pz_data
 
     def apply_simple_redshift_cut(self, shear_data):
         pz_data = {}
@@ -553,6 +452,8 @@ class TXSourceSelectorBase(PipelineStage):
 
 class TXSourceSelectorMetacal(TXSourceSelectorBase):
     """
+    Source selection and tomography for metacal catalogs
+
     This selector subclass is designed for metacal-type catalogs like those
     used in Dark Energy Survey Y1 and Y3 data releases. In DESC they are
     superseded by MetaDetect, see below.
@@ -689,6 +590,8 @@ class TXSourceSelectorMetacal(TXSourceSelectorBase):
 
 class TXSourceSelectorMetadetect(TXSourceSelectorBase):
     """
+    Source selection and tomography for metadetect catalogs
+
     This subclass selects for MetaDetect catalogs, which is expected to be used for
     Rubin data. It computes the selection bias due to object detection by repeating
     the detection process under different applied shears.
@@ -797,6 +700,8 @@ class TXSourceSelectorMetadetect(TXSourceSelectorBase):
 
 class TXSourceSelectorLensfit(TXSourceSelectorBase):
     """
+    Source selection and tomography for lensfit catalogs
+
     This selector class is for Lensfit catalogs like those used in KIDS.
 
     It is a simpler calibration scheme than the above two, and does not involve
@@ -863,6 +768,8 @@ class TXSourceSelectorLensfit(TXSourceSelectorBase):
 
 class TXSourceSelectorHSC(TXSourceSelectorBase):
     """
+    Source selection and tomography for HSC catalogs
+
     This subclass is for selecting objects on catalogs of the form made by HSC.
 
     This scheme is quite similar to the one used by lensfit. The main difference is in

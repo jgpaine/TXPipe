@@ -8,7 +8,12 @@ import socket
 
 
 class PipelineStage(PipelineStageBase):
-    name = "Error"
+    """
+    The parent class for all TXPipe stages
+
+    This stage should not be used directly (hence the name)
+    """
+    name = "BaseStageDoNotRunDirectly"
     inputs = []
     outputs = []
     config_options = {}
@@ -49,6 +54,7 @@ class PipelineStage(PipelineStageBase):
         print(
             f"{t}: Process {self.rank}:{tag} Remaining memory on {host} {avail:.1f} GB / {total:.1f} GB"
         )
+        sys.stdout.flush()
 
     def combined_iterators(self, rows, *inputs, parallel=True):
         if not len(inputs) % 3 == 0:

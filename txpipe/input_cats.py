@@ -11,6 +11,8 @@ from .utils.timer import Timer
 
 class TXCosmoDC2Mock(PipelineStage):
     """
+    Simulate mock shear and photometry measurements from CosmoDC2 (or similar)
+
     This stage simulates metacal data and metacalibrated
     photometry measurements, starting from a cosmology catalogs
     of the kind used as an input to DC2 image and obs-catalog simulations.
@@ -42,6 +44,7 @@ class TXCosmoDC2Mock(PipelineStage):
         "apply_mag_cut": False,  # used when comparing to descqa measurements
         "Mag_r_limit": -19,  # used to decide what objects to cut out
         "metadetect": True,  # Alternatively we will mock a  metacal catalog
+        "add_shape_noise": True, 
     }
 
     def data_iterator(self, gc):
@@ -520,7 +523,11 @@ class TXCosmoDC2Mock(PipelineStage):
 
         # Use a fixed shape noise per component to generate
         # an overall
-        shape_noise = 0.26
+        if self.config["add_shape_noise"]:
+            shape_noise = 0.26
+        else:
+            shape_noise = 0.
+            
         eps = np.random.normal(0, shape_noise, nobj) + 1.0j * np.random.normal(
             0, shape_noise, nobj
         )
@@ -753,7 +760,11 @@ class TXCosmoDC2Mock(PipelineStage):
 
         # Use a fixed shape noise per component to generate
         # an overall
-        shape_noise = 0.26
+        if self.config["add_shape_noise"]:
+            shape_noise = 0.26
+        else:
+            shape_noise = 0.
+            
         eps = np.random.normal(0, shape_noise, nobj) + 1.0j * np.random.normal(
             0, shape_noise, nobj
         )
@@ -941,13 +952,9 @@ class TXCosmoDC2Mock(PipelineStage):
 
 class TXBuzzardMock(TXCosmoDC2Mock):
     """
-    This stage simulates metacal data and metacalibrated
-    photometry measurements, starting from a cosmology catalogs
-    of the kind used as an input to DC2 image and obs-catalog simulations.
+    Simulate mock photometry from Buzzard.
 
-    This is mainly useful for testing infrastructure in advance
-    of the DC2 catalogs being available, but might also be handy
-    for starting from a purer simulation.
+    May be obsolete.
     """
 
     name = "TXBuzzardMock"
@@ -973,6 +980,8 @@ class TXBuzzardMock(TXCosmoDC2Mock):
 
 class TXGaussianSimsMock(TXCosmoDC2Mock):
     """
+    Simulate mock photometry from gaussian simulations
+
     This stage simulates metacal data and metacalibrated
     photometry measurements, starting from simple Gaussian simulations
     produced starting from CCL power spectra and poission sampling galaxies
@@ -993,7 +1002,6 @@ class TXGaussianSimsMock(TXCosmoDC2Mock):
 
     config_options = {
         "cat_name": "GaussianSims",
-        "cat_name_fake": "",
         "visits_per_band": 165,  # used in the noise simulation
         "snr_limit": 0.0,  # we want to keep all input objects here
         "max_size": 99999999999999,  # for testing on smaller catalogs
@@ -1004,6 +1012,7 @@ class TXGaussianSimsMock(TXCosmoDC2Mock):
         "flip_g2": False,  # this matches the metacal definition, and the treecorr/namaster one
         "apply_mag_cut": False,  # used when comparing to descqa measurements
         "metadetect": True,  # Alternatively we will mock a  metacal catalog
+        "add_shape_noise": False, # the input cats already have shape noise included
     }
 
     def data_iterator(self, cat):
@@ -1070,8 +1079,8 @@ class TXGaussianSimsMock(TXCosmoDC2Mock):
 
         print(f"Loading from catalog {cat_name}")
 
-        cat = np.load(cat_name)
-
+        cat = np.load(cat_name, allow_pickle = True)
+    
         N = len(cat[0])
 
         return cat, N

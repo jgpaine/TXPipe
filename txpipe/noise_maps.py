@@ -19,6 +19,12 @@ from .utils import (
 
 
 class TXSourceNoiseMaps(TXBaseMaps):
+    """
+    Generate realizations of shear noise maps with random rotations
+
+    This takes the shear catalogs and tomography and randomly spins the
+    shear values in it, removing the shear signal and leaving only shape noise
+    """
     name = "TXSourceNoiseMaps"
 
     inputs = [
@@ -186,6 +192,12 @@ class TXSourceNoiseMaps(TXBaseMaps):
 
 
 class TXLensNoiseMaps(TXBaseMaps):
+    """
+    Generate lens density noise realizations using random splits
+
+    This randomly assigns each galaxy to one of two bins and uses the
+    different between the halves to get a noise estimate.
+    """
     name = "TXLensNoiseMaps"
 
     inputs = [
@@ -323,9 +335,9 @@ class TXLensNoiseMaps(TXBaseMaps):
                 # using half the mean from the full map to reduce
                 # noise, but thought that might add covariance
                 # to the two maps, and this shouldn't be that noisy
-
-                mu1 = np.average(half1, weights=mask[reverse_map])
-                mu2 = np.average(half2, weights=mask[reverse_map])
+                # half1 and half2 are already weighted by the mask, so we just need the average
+                mu1 = np.average(half1[mask[reverse_map] > 0])
+                mu2 = np.average(half2[mask[reverse_map] > 0])
 
                 # This will produce some mangled sentinel values
                 # but they will be masked out
@@ -342,6 +354,12 @@ class TXLensNoiseMaps(TXBaseMaps):
 
 
 class TXExternalLensNoiseMaps(TXLensNoiseMaps):
+    """
+    Generate lens density noise realizations using random splits of an external catalog
+
+    This randomly assigns each galaxy to one of two bins and uses the
+    different between the halves to get a noise estimate.
+    """
     name = "TXExternalLensNoiseMaps"
 
     inputs = [
@@ -392,7 +410,15 @@ def ngal_split_add(
 
 
 class TXNoiseMapsJax(PipelineStage):
-    """TXNoiseMaps implementation using Google Jax for GPU acceleration"""
+    """
+    Generate noise realisations of lens and source maps using JAX
+
+    This is a JAX/GPU version of the noise map stages.
+
+    Need to update to stop assuming lens and source are the same
+    and split into two stages.
+
+    """
 
     name = "TXNoiseMapsJax"
     inputs = [

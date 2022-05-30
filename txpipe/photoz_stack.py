@@ -114,7 +114,7 @@ class Stack:
 
 class TXPhotozSourceStack(PipelineStage):
     """
-    Naively stack photo-z PDFs in bins according to previous selections.
+    Naively stack source photo-z PDFs in bins
 
     This parent class does only the source bins.
     """
@@ -235,7 +235,7 @@ class TXPhotozSourceStack(PipelineStage):
 
 class TXPhotozLensStack(TXPhotozSourceStack):
     """
-    Naively stack photo-z PDFs in bins according to previous selections.
+    Naively stack lens photo-z PDFs in bins
 
     This parent class does only the source bins.
     """
@@ -323,8 +323,7 @@ class TXPhotozLensStack(TXPhotozSourceStack):
 
 class TXPhotozPlots(PipelineStage):
     """
-    Make n(z) plots
-
+    Make n(z) plots of source and lens galaxies
     """
 
     name = "TXPhotozPlots"
@@ -362,6 +361,8 @@ class TXPhotozPlots(PipelineStage):
 
 class TXSourceTrueNumberDensity(TXPhotozSourceStack):
     """
+    Make an ideal true source n(z) using true redshifts
+
     Fake an n(z) by histogramming the true redshift values for each object.
     Uses the same method as its parent but loads the data
     differently and uses the truth redshift as a delta function PDF
@@ -404,7 +405,7 @@ class TXSourceTrueNumberDensity(TXPhotozSourceStack):
             has_z = "redshift_true" in photo_file["shear"].keys()
             if not has_z:
                 msg = (
-                    "The photometry_catalog file you supplied does not have a redshift_true column. "
+                    "The shear_catalog file you supplied does not have a redshift_true column. "
                     "If you're running on sims you need to make sure to ingest that column from GCR. "
                     "If you're running on real data then sadly this isn't going to work. "
                     "Use a different stacking stage."
@@ -423,6 +424,11 @@ class TXSourceTrueNumberDensity(TXPhotozSourceStack):
 
 
 class TXLensTrueNumberDensity(TXPhotozLensStack, TXSourceTrueNumberDensity):
+    """
+    Make an ideal true lens n(z) using true redshifts
+
+    This inherits from two parent classes, which can be confusing.
+    """
     name = "TXLensTrueNumberDensity"
     inputs = [
         ("photometry_catalog", HDFFile),

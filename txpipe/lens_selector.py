@@ -1,16 +1,27 @@
 from .base_stage import PipelineStage
-from .data_types import YamlFile, TomographyCatalog, HDFFile, TextFile
+from .data_types import (
+    YamlFile,
+    TomographyCatalog,
+    HDFFile,
+    TextFile,
+    FiducialCosmology,
+)
 from .utils import LensNumberDensityStats
 from .utils import Splitter
+from .binning import build_tomographic_classifier, apply_classifier
 import numpy as np
 import warnings
 
 
 class TXBaseLensSelector(PipelineStage):
     """
-    This pipeline stage selects objects to be used
+    Base class for lens object selection, using the BOSS Target Selection.
+
+    Subclasses of this pipeline stage select objects to be used
     as the lens sample for the galaxy clustering and
     shear-position calibrations.
+
+    The cut used here is simplistic and should be replaced.
     """
 
     name = "TXBaseLensSelector"
@@ -64,6 +75,8 @@ class TXBaseLensSelector(PipelineStage):
 
         iterator = self.data_iterator()
 
+        selector = self.prepare_selector()
+
         # We will collect the selection biases for each bin
         # as a matrix.  We will collect together the different
         # matrices for each chunk and do a weighted average at the end.
@@ -75,7 +88,7 @@ class TXBaseLensSelector(PipelineStage):
         for (start, end, phot_data) in iterator:
             print(f"Process {self.rank} running selection for rows {start:,}-{end:,}")
 
-            pz_data = self.apply_redshift_cut(phot_data)
+            pz_data = self.apply_redshift_cut(phot_data, selector)
 
             # Select lens bin objects
             lens_gals = self.select_lens(phot_data)
@@ -100,7 +113,10 @@ class TXBaseLensSelector(PipelineStage):
         # Restore the original warning settings in case we are being called from a library
         np.seterr(**original_warning_settings)
 
-    def apply_redshift_cut(self, phot_data):
+    def prepare_selector(self):
+        return None
+
+    def apply_redshift_cut(self, phot_data, _):
 
         pz_data = {}
         nbin = len(self.config["lens_zbin_edges"]) - 1
@@ -249,6 +265,12 @@ class TXBaseLensSelector(PipelineStage):
 
 
 class TXTruthLensSelector(TXBaseLensSelector):
+    """
+    Select lens objects based on true redshifts and BOSS criteria
+
+    This is useful for testing with idealised lens bins.
+    """
+
     name = "TXTruthLensSelector"
 
     inputs = [
@@ -271,6 +293,12 @@ class TXTruthLensSelector(TXBaseLensSelector):
 
 
 class TXMeanLensSelector(TXBaseLensSelector):
+    """
+    Select lens objects based on mean redshifts and BOSS criteria
+
+    This requires PDFs to have been estimated earlier.
+    """
+
     name = "TXMeanLensSelector"
     inputs = [
         ("photometry_catalog", HDFFile),
@@ -293,6 +321,12 @@ class TXMeanLensSelector(TXBaseLensSelector):
 
 
 class TXModeLensSelector(TXBaseLensSelector):
+    """
+    Select lens objects based on best-fit redshifts and BOSS criteria
+
+    This requires PDFs to have been estimated earlier.
+    """
+
     name = "TXModeLensSelector"
     inputs = [
         ("photometry_catalog", HDFFile),
@@ -314,9 +348,59 @@ class TXModeLensSelector(TXBaseLensSelector):
             yield s, e, data
 
 
+class TXRandomForestLensSelector(TXBaseLensSelector):
+    name = "TXRandomForestLensSelector"
+    inputs = [
+        ("photometry_catalog", HDFFile),
+        ("calibration_table", TextFile),
+    ]
+    config_options = {
+        "verbose": False,
+        "bands": "ugrizy",
+        "chunk_rows": 10000,
+        "lens_zbin_edges": [float],
+        "random_seed": 42,
+        "mag_i_limit": 24.1,
+    }
+
+    def data_iterator(self):
+        chunk_rows = self.config["chunk_rows"]
+        phot_cols = ["mag_u", "mag_g", "mag_r", "mag_i", "mag_z", "mag_y"]
+
+        for s, e, data in self.iterate_hdf(
+            "photometry_catalog", "photometry", phot_cols, chunk_rows
+        ):
+            yield s, e, data
+
+    def prepare_selector(self):
+        return build_tomographic_classifier(
+            self.config["bands"],
+            self.get_input("calibration_table"),
+            self.config["lens_zbin_edges"],
+            self.config["random_seed"],
+            self.comm,
+        )
+
+    def apply_redshift_cut(self, phot_data, selector):
+        classifier, features = selector
+        shear_catalog_type = "not applicable"
+        bands = self.config["bands"]
+        pz_data = apply_classifier(
+            classifier, features, bands, shear_catalog_type, phot_data
+        )
+        return pz_data
+
+    def select_lens(self, phot_data):
+        mag_i = phot_data["mag_i"]
+        limit = self.config["mag_i_limit"]
+        return (mag_i < limit).astype(np.int8)
+
+
 class TXLensCatalogSplitter(PipelineStage):
     """
-    Split a lens catalog file into a new file with separate bins.
+    Split a lens catalog file into a new file with separate bins
+
+    Splitting up like this helps reduce memory usage in TreeCorr later
     """
 
     name = "TXLensCatalogSplitter"
@@ -333,10 +417,8 @@ class TXLensCatalogSplitter(PipelineStage):
     config_options = {
         "initial_size": 100_000,
         "chunk_rows": 100_000,
+        "extra_cols": [""],
     }
-
-    lens_cat_tag = "photometry_catalog"
-    lens_cat_sec = "photometry"
 
     def run(self):
 
@@ -345,6 +427,7 @@ class TXLensCatalogSplitter(PipelineStage):
             counts = f["tomography/lens_counts"][:]
             count2d = f["tomography/lens_counts_2d"][:]
 
+        extra_cols = [c for c in self.config["extra_cols"] if c]
         cols = ["ra", "dec", "weight"]
 
         # Object we use to make the separate lens bins catalog
@@ -355,7 +438,8 @@ class TXLensCatalogSplitter(PipelineStage):
 
         bins = {b: c for b, c in enumerate(counts)}
         bins["all"] = count2d
-        splitter = Splitter(cat_group, "bin", cols, bins)
+        dtypes = {"id": "i8", "flags": "i8"}
+        splitter = Splitter(cat_group, "bin", cols + extra_cols, bins, dtypes=dtypes)
 
         my_bins = list(self.split_tasks_by_rank(bins))
         if my_bins:
@@ -364,20 +448,7 @@ class TXLensCatalogSplitter(PipelineStage):
         else:
             print(f"Note: Process {self.rank} will not do anything.")
 
-        it = self.combined_iterators(
-            self.config["chunk_rows"],
-            # first file
-            "lens_tomography_catalog",
-            "tomography",
-            ["lens_bin", "lens_weight"],
-            # second file
-            self.lens_cat_tag,
-            self.lens_cat_sec,
-            ["ra", "dec"],
-            parallel=False,
-        )
-
-        for s, e, data in it:
+        for s, e, data in self.data_iterator():
             if self.rank == 0:
                 print(f"Process 0 binning data in range {s:,} - {e:,}")
 
@@ -393,19 +464,170 @@ class TXLensCatalogSplitter(PipelineStage):
         splitter.finish(my_bins)
         cat_output.close()
 
+    def data_iterator(self):
+        extra_cols = [c for c in self.config["extra_cols"] if c]
+        return self.combined_iterators(
+            self.config["chunk_rows"],
+            # first file
+            "lens_tomography_catalog",
+            "tomography",
+            ["lens_bin", "lens_weight"],
+            # second file
+            "photometry_catalog",
+            "photometry",
+            ["ra", "dec"] + extra_cols,
+            parallel=False,
+        )
+
 
 class TXExternalLensCatalogSplitter(TXLensCatalogSplitter):
-    name = "TXExternalLensCatalogSplitter"
     """
     Split an external lens catalog into bins
+
+    Implemented as a subclass of TXLensCatalogSplitter, and
+    changes only file names.
     """
+
+    name = "TXExternalLensCatalogSplitter"
     inputs = [
         ("lens_tomography_catalog", TomographyCatalog),
         ("lens_catalog", HDFFile),
+        ("fiducial_cosmology", FiducialCosmology),
     ]
-    lens_cat_tag = "lens_catalog"
 
-    lens_cat_sec = "lens"
+    def data_iterator(self):
+        extra_cols = [c for c in self.config["extra_cols"] if c]
+        return self.combined_iterators(
+            self.config["chunk_rows"],
+            # first file
+            "lens_tomography_catalog",
+            "tomography",
+            ["lens_bin", "lens_weight"],
+            # second file
+            "lens_catalog",
+            "lens",
+            ["ra", "dec"] + extra_cols,
+            parallel=False,
+        )
+
+
+class TXLensCatalogSplitter3D(TXLensCatalogSplitter):
+    """
+    Split up a lens catalog into bins and add a radial coordinate
+
+    The radial coordinate is generated from the redshift and a fiducial cosmology.
+    The redshift column can be selected; by default it is the mean z.
+    """
+
+    name = "TXLensCatalogSplitter3D"
+    inputs = [
+        ("lens_tomography_catalog", TomographyCatalog),
+        ("photometry_catalog", HDFFile),
+        ("fiducial_cosmology", FiducialCosmology),
+        ("lens_photoz_pdfs", HDFFile),
+    ]
+
+    config_options = TXLensCatalogSplitter.config_options.copy()
+    config_options["redshift_column"] = "z_mean"
+
+    def run(self):
+        # Add comoving distance to extra cols if needed.
+        self.config["extra_cols"].append("comoving_distance")
+        super().run()
+
+    def data_iterator(self):
+        import pyccl
+
+        z_col = self.config["redshift_column"]
+        extra_cols = [
+            c for c in self.config["extra_cols"] if c and c != "comoving_distance"
+        ]
+
+        with self.open_input("fiducial_cosmology", wrapper=True) as f:
+            cosmo = f.to_ccl()
+
+        it = self.combined_iterators(
+            self.config["chunk_rows"],
+            # first file
+            "lens_tomography_catalog",
+            "tomography",
+            ["lens_bin", "lens_weight"],
+            # second file
+            "photometry_catalog",
+            "photometry",
+            ["ra", "dec"] + extra_cols,
+            "lens_photoz_pdfs",
+            "point_estimates",
+            [z_col],
+            parallel=False,
+        )
+
+        # This iterates through chunks of the input catalogs, but for each
+        # chunk it also intercepts and adds the radial distance. So this function
+        # returns an iterator, just like combined_iterators does.
+        for s, e, data in it:
+            z = data[z_col]
+            a = 1.0 / (1 + z)
+            d = pyccl.comoving_radial_distance(cosmo, a)
+            data["comoving_distance"] = d
+            yield s, e, data
+
+
+class TXExternalLensCatalogSplitter3D(TXLensCatalogSplitter):
+    """
+    Split an external lens catalog into bins, and add a radial coordinate.
+
+    Like TXLensCatalogSplitter3D this adds uses the redshift (z_mean, by default)
+    and a fiducial cosmology.
+    """
+
+    name = "TXExternalLensCatalogSplitter3D"
+    inputs = [
+        ("lens_tomography_catalog", TomographyCatalog),
+        ("lens_catalog", HDFFile),
+        ("fiducial_cosmology", FiducialCosmology),
+    ]
+
+    def run(self):
+        self.config["extra_cols"].append("comoving_distance")
+        super().run()
+
+    def data_iterator(self):
+        import pyccl
+
+        # We load all cols except for comoving distance, which we calculate
+        extra_cols = [
+            c for c in self.config["extra_cols"] if c and c != "comoving_distance"
+        ]
+
+        # We need to read the redshift in to compute the distance
+        if "redshift" not in extra_cols:
+            extra_cols.append("redshift")
+
+        with self.open_input("fiducial_cosmology", wrapper=True) as f:
+            cosmo = f.to_ccl()
+
+        it = self.combined_iterators(
+            self.config["chunk_rows"],
+            # first file
+            "lens_tomography_catalog",
+            "tomography",
+            ["lens_bin", "lens_weight"],
+            # second file
+            "lens_catalog",
+            "lens",
+            ["ra", "dec"] + extra_cols,
+            parallel=False,
+        )
+
+        # See the explanation of this in the TXLensCatalogSplitter3D
+        # class above
+        for s, e, data in it:
+            z = data.pop("redshift")
+            a = 1.0 / (1 + z)
+            d = pyccl.comoving_radial_distance(cosmo, a)
+            data["comoving_distance"] = d
+            yield s, e, data
 
 
 if __name__ == "__main__":

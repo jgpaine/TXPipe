@@ -80,6 +80,8 @@ class TXStarCatalogSplitter(PipelineStage):
 
 class TXGammaTFieldCenters(TXTwoPoint):
     """
+    Make diagnostic 2pt measurements of tangential shear around field centers
+
     This subclass of the standard TXTwoPoint uses the centers
     of exposure fields as "lenses", as a systematics test.
     """
@@ -118,6 +120,8 @@ class TXGammaTFieldCenters(TXTwoPoint):
         "use_randoms": True,
         "patch_dir": "./cache/patches",
         "low_mem": False,
+        "chunk_rows": 100_000,
+        "share_patch_files": False,
     }
 
     def run(self):
@@ -149,6 +153,7 @@ class TXGammaTFieldCenters(TXTwoPoint):
             ra_units="degree",
             dec_units="degree",
             patch_centers=self.get_input("patch_centers"),
+            save_patch_dir=self.get_patch_dir("random_cats", i),
         )
         return rancat
 
@@ -164,6 +169,7 @@ class TXGammaTFieldCenters(TXTwoPoint):
             ra_units="degree",
             dec_units="degree",
             patch_centers=self.get_input("patch_centers"),
+            save_patch_dir=self.get_patch_dir("exposures", i),
         )
         return cat
 
@@ -173,6 +179,9 @@ class TXGammaTFieldCenters(TXTwoPoint):
         return [("all", 0, SHEAR_POS)]
 
     def write_output(self, source_list, lens_list, meta, results):
+        # This subclass only needs the root process for this task
+        if self.rank != 0:
+            return
         # we write output both to file for later and to
         # a plot
         self.write_output_sacc(meta, results)
@@ -251,6 +260,8 @@ class TXGammaTFieldCenters(TXTwoPoint):
 
 class TXGammaTStars(TXTwoPoint):
     """
+    Make diagnostic 2pt measurements of tangential shear around stars
+
     This subclass of the standard TXTwoPoint uses the centers
     of stars as "lenses", as a systematics test.
     """
@@ -293,6 +304,8 @@ class TXGammaTStars(TXTwoPoint):
         "use_randoms": True,
         "patch_dir": "./cache/patches",
         "low_mem": False,
+        "chunk_rows": 100_000,
+        "share_patch_files": False,
     }
 
     def run(self):
@@ -317,6 +330,7 @@ class TXGammaTStars(TXTwoPoint):
             ra_units="degree",
             dec_units="degree",
             patch_centers=self.get_input("patch_centers"),
+            save_patch_dir=self.get_patch_dir("binned_star_catalog", i),
         )
         return cat
 
@@ -334,6 +348,7 @@ class TXGammaTStars(TXTwoPoint):
             ra_units="degree",
             dec_units="degree",
             patch_centers=self.get_input("patch_centers"),
+            save_patch_dir=self.get_patch_dir("random_cats", i),
         )
         return rancat
 
@@ -343,6 +358,10 @@ class TXGammaTStars(TXTwoPoint):
         return [("all", "bright", SHEAR_POS), ("all", "dim", SHEAR_POS)]
 
     def write_output(self, source_list, lens_list, meta, results):
+        # This subclass only needs the root process for this task
+        if self.rank != 0:
+            return
+
         # we write output both to file for later and to a plot
         self.write_output_sacc(meta, results[0], "gammat_bright_stars", "Bright")
         self.write_output_sacc(meta, results[1], "gammat_dim_stars", "Dim")
@@ -433,6 +452,11 @@ class TXGammaTStars(TXTwoPoint):
 
 class TXGammaTRandoms(TXTwoPoint):
     """
+    Make diagnostic 2pt measurements of tangential shear around randoms
+
+    It's not clear to me that this is a useful null test; if it was we
+    wouldn't need to subtrac this term in the Landay-Szalay estimator.
+
     This subclass of the standard TXTwoPoint uses the centers
     of stars as "lenses", as a systematics test.
     """
@@ -469,6 +493,8 @@ class TXGammaTRandoms(TXTwoPoint):
         "use_randoms": False,
         "patch_dir": "./cache/patches",
         "low_mem": False,
+        "chunk_rows": 100_000,
+        "share_patch_files": False,
     }
 
     def run(self):
@@ -505,6 +531,7 @@ class TXGammaTRandoms(TXTwoPoint):
             ra_units="degree",
             dec_units="degree",
             patch_centers=self.get_input("patch_centers"),
+            save_patch_dir=self.get_patch_dir("random_cats", i),
         )
         return cat
 
@@ -534,7 +561,6 @@ class TXGammaTRandoms(TXTwoPoint):
         z = (dvalue - flat1) / derror
         chi2 = np.sum(z**2)
         chi2dof = chi2 / (len(dtheta) - 1)
-        print("error,", derror)
 
         plt.errorbar(
             dtheta,
@@ -551,7 +577,6 @@ class TXGammaTRandoms(TXTwoPoint):
         plt.ylabel(r"$\theta \cdot \gamma_t(\theta)$")
         plt.title("Randoms Tangential Shear")
 
-        print("type", type(fig))
         fig.close()
 
     def write_output_sacc(self, meta, results):
@@ -608,7 +633,12 @@ class TXGammaTRandoms(TXTwoPoint):
 
 # Aperture Mass class that inherits from TXTwoPoint
 class TXApertureMass(TXTwoPoint):
+    """
+    Measure the aperture mass statistics with TreeCorr
 
+    There are real and imaginary components of the aperture mass
+    and its cross term.
+    """
     name = "TXApertureMass"
     inputs = [
         ("binned_shear_catalog", ShearCatalog),
@@ -641,6 +671,8 @@ class TXApertureMass(TXTwoPoint):
         "low_mem": False,
         "patch_dir": "./cache/patches",
         "low_mem": False,
+        "chunk_rows": 100_000,
+        "share_patch_files": False,
     }
 
     # These two functions can be combined into a single one.
@@ -707,6 +739,10 @@ class TXApertureMass(TXTwoPoint):
             # First the tracers and generic tags
             tracer1 = f"source_{d.i}"
             tracer2 = f"source_{d.j}"
+
+            # Skip empty bins
+            if d.object is None:
+                continue
 
             theta = np.exp(d.object.meanlogr)
             weight = d.object.weight

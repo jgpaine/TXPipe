@@ -3,7 +3,6 @@ import numpy as np
 import healpy
 import pathlib
 
-
 class MyNmtBinFlat(nmt.NmtBinFlat):
     def __init__(self, l0, lf):
         super().__init__(l0, lf)
@@ -87,7 +86,7 @@ class MyNmtBin(nmt.NmtBin):
 class WorkspaceCache:
     def __init__(self, dirname):
         self.path = pathlib.Path(dirname)
-        self.path.mkdir(exist_ok=True)
+        self.path.mkdir(parents=True, exist_ok=True)
         self._loaded = {}
 
     def get(self, key):
